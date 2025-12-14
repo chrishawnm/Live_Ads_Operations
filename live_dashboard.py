@@ -11,7 +11,7 @@ AD_BREAK_DURATION = 30.0
 CHAOS_MODE = True 
 
 # Setup the Streamlit Page
-st.title("Netflix Ads Live Monitor")
+st.title("Netflix Ads Live Monitor Simulation")
 st.write("Monitoring Stream: " + STREAM_ID)
 
 # --- 1. SETUP CHART (OUTSIDE THE LOOP) ---
@@ -28,6 +28,8 @@ with st.sidebar:
     **Goal:** Simulate the "Health of Ad Operations" monitoring pipeline.
     
     **Technical Foundation:** Based on Netflix Patent *12262081 (Targeted Live Stream Ads)*. This dashboard monitors the raw telemetry from a live HLS stream to ensure **SCTE-35** ad markers are successfully splicing ads into content.
+
+    The app will start on its own to **STOP** press the **STOP** button in the top right corner. To **START**, refresh the page.
     """)
     
     st.divider()

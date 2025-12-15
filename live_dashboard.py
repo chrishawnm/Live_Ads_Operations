@@ -17,7 +17,6 @@ with st.sidebar:
     st.header("Project Context: Netflix Ads")
     
     st.info("""
-    **Role:** Analytics Engineer
     **Goal:** Translate upstream *Engineering Signals* into downstream *Business Impact*.
     """)
     

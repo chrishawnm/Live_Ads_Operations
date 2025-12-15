@@ -4,84 +4,119 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime, timezone
 
-# --- CONFIGURATION ---
+
 STREAM_ID = "nflx_live_event_superbowl_v1"
 SEGMENT_DURATION = 2.0  
 AD_BREAK_DURATION = 30.0 
 CHAOS_MODE = True 
 
-# Setup the Streamlit Page
-st.set_page_config(page_title="Netflix Ads Watchdog", layout="wide") # Optional: Makes it look wider/pro
-st.title("Netflix Ads Live Monitor Simulation")
+#streamlit page
+st.set_page_config(page_title="Netflix Ads Analytics", layout="wide")
+st.title("Netflix Ads: Real-Time QoE & Revenue Monitor")
 
-# --- 1. SETUP UI ELEMENTS (OUTSIDE THE LOOP) ---
-# Top Status Bar (New!)
-col1, col2 = st.columns([1, 3])
-with col1:
-    st.write("Stream Source:")
-    st.code(STREAM_ID)
-with col2:
-    # This is where we will show "Content" vs "Ad"
-    status_indicator = st.empty()
+#tabs
+tab1, tab2 = st.tabs(["Business Impact Dashboard", "Data Lineage & SQL"])
 
-st.divider()
-
-# Chart & Alerts
-chart_placeholder = st.empty()
-alert_placeholder = st.empty()
-
-# --- SIDEBAR: PROJECT CONTEXT ---
+#sidebar
 with st.sidebar:
-    st.header("Project Context: Netflix Ads Engineer")
+    st.header("Analytics Engineer Context")
     st.markdown("""
-    **Goal:** Simulate the "Health of Ad Operations" monitoring pipeline.
+    **Objective:** Revenue impact of upstream engineering failures.
     
-    **Technical Foundation:** Based on Netflix Patent *12262081 (Targeted Live Stream Ads)*. This dashboard monitors the raw telemetry from a live HLS stream to ensure **SCTE-35** ad markers are successfully splicing ads into content.
+    **Metric Definitions:**
+    * **Churn Risk:** Modeled as 5% drop per 1s of ad-buffering.
+    * **Revenue at Risk:** $0.05 CPM * Lost Impressions.
+    * **SCTE-35 Failure:** Technical signal loss preventing ad insertion.
     """)
-    
     st.divider()
-    
-    st.subheader("1. Ad-Buffering (QoE)")
-    st.info("""
-    **Logic:** `latency > 1000ms` AND `event == 'ad_playing'`
-    **The Story:** High latency during content is annoying, but during an **Ad**, it costs money. This flags "wasted impressions."
-    """)
+    st.caption("Simulation Running...")
 
-    st.subheader("2. Lost Packets (Billing)")
-    st.warning("""
-    **Logic:** Gap in `seq_id` (e.g., 50 -> 52)
-    **The Story:** Ads are billed on "proof of play." If telemetry logs are dropped, we cannot prove the ad was delivered.
-    """)
+#global values
+if 'df2' not in st.session_state:
+    st.session_state.df2 = pd.DataFrame()
+if 'viewers' not in st.session_state:
+    st.session_state.viewers = 10000  
+if 'revenue_lost' not in st.session_state:
+    st.session_state.revenue_lost = 0.0
 
-    st.subheader("3. Signal Failure (Eng Health)")
-    st.error("""
-    **Logic:** `scte35_trigger` fired but `payload` is NULL.
-    **The Story:** Encoder failed to generate the Hex payload. Result: "Dead Air" (Black Screen).
-    """)
-    
-    st.caption("Auto-refreshing every 2 seconds...")
-
-# Initialize History Buffer
-df2 = pd.DataFrame()
-prev_seq_id = None 
-
-# SCTE-35 Mocking
+# SCTE-35 
 def generate_scte35_payload_mock():
     return "0xFC30" + "".join([random.choice("0123456789ABCDEF") for _ in range(8)])
 
 def generate_stream_data():
-    global df2, prev_seq_id
-    
     sequence_number = 0
     in_ad_break = False
     ad_break_remaining = 0
+    prev_seq_id = None
     
+    #placeholders
+    with tab1:
+        # Top Level Business Metrics
+        metric_col1, metric_col2, metric_col3 = st.columns(3)
+        with metric_col1:
+            viewer_metric = st.empty()
+        with metric_col2:
+            revenue_metric = st.empty()
+        with metric_col3:
+            health_metric = st.empty()
+            
+        st.divider()
+        chart_placeholder = st.empty()
+        alert_placeholder = st.empty()
+
+    #sql - data model
+    with tab2:
+        st.markdown("### dbt / SQL Transformation Layer")
+        st.markdown("""
+        *Modeled raw telemetry into a business-ready table*
+        
+        **Target Table:** `ads_quality_daily`
+        """)
+        st.code("""
+        -- dbt model: mart_ads_quality_experience
+        WITH raw_telemetry AS (
+            SELECT 
+                stream_id,
+                timestamp,
+                event_type,
+                latency_ms,
+                scte35_payload
+            FROM {{ source('telemetry', 'stream_logs') }}
+        ),
+        
+        flagged_events AS (
+            SELECT 
+                *,
+               -- ad buffers at 1000 ms
+                CASE 
+                    WHEN event_type = 'ad_playing' AND latency_ms > 1000 THEN 1 
+                    ELSE 0 
+                END AS is_ad_buffering_event,
+                -- signal failure if payload null
+                CASE 
+                    WHEN event_type = 'scte35_trigger' AND scte35_payload IS NULL THEN 1 
+                    ELSE 0 
+                END AS is_signal_failure
+            FROM raw_telemetry
+        )
+        
+        SELECT 
+            stream_id,
+            DATE_TRUNC('hour', timestamp) as hour_bucket,
+            COUNT(*) as total_packets,
+            SUM(is_ad_buffering_event) as total_buffering_events,
+            SUM(is_signal_failure) as failed_ad_insertions
+        FROM flagged_events
+        GROUP BY 1, 2
+        """, language='sql')
+        st.info("engineering signals (left) business metrics (right)")
+
     while True:
         current_time = datetime.now(timezone.utc).isoformat()
         scte35_payload = None
         event_type = "content_playing"
         
-        # --- 1. GENERATE DATA ---
+        #fake data generatiion
         if in_ad_break:
             segment_type = "ad"
             event_type = "ad_playing"
@@ -113,52 +148,49 @@ def generate_stream_data():
             "latency_ms": round(latency_ms, 2)
         }
 
-        # --- 2. PROCESS DATA ---
-        if len(df2) >= 50:
-            df2 = df2.iloc[1:]
+        #processing fake data
+        if len(st.session_state.df2) >= 50:
+            st.session_state.df2 = st.session_state.df2.iloc[1:]
             
         df = pd.DataFrame([data_packet])
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         
-        df['ad_buffering'] = (df['latency_ms'] >= 1000) & (df['event'] == 'ad_playing')
+        #metrics
+        is_buffering = (df['latency_ms'] >= 1000) & (df['event'] == 'ad_playing')
+        df['ad_buffering'] = is_buffering
         
-        if prev_seq_id is not None:
-            df['lost_packet'] = df['seq_id'] != (prev_seq_id + 1)
+        #biz logic
+        if is_buffering.any():
+            drop_off = random.randint(50, 150)
+            st.session_state.viewers -= drop_off
+            st.session_state.revenue_lost += (drop_off * 0.05) # Fake CPM calc
         else:
-            df['lost_packet'] = False
+            # Slow recovery
+            if st.session_state.viewers < 10000:
+                st.session_state.viewers += random.randint(5, 20)
 
-        df['signal_failure'] = (df['scte35_payload'] == 'null') & (df['event'] == 'scte35_trigger')
         df['time_only'] = df['timestamp'].dt.strftime('%H:%M:%S')
-        
-        df2 = pd.concat([df2, df], ignore_index=True)
+        st.session_state.df2 = pd.concat([st.session_state.df2, df], ignore_index=True)
         prev_seq_id = data_packet['seq_id']
 
-        # --- 3. UPDATE UI ---
+        metric_col1.metric("Live Viewers", f"{st.session_state.viewers:,}", delta=None)
+        metric_col2.metric("Revenue at Risk (Session)", f"${st.session_state.revenue_lost:,.2f}", delta_color="inverse")
         
-        # >>> NEW STATUS INDICATOR LOGIC <<<
-        if "ad" in event_type or event_type == "scte35_trigger":
-            status_indicator.warning(f"🟡 **AD BREAK IN PROGRESS** | Remaining: {ad_break_remaining}s")
+        if "ad" in event_type:
+             health_metric.warning("Ad Break Active")
         else:
-            status_indicator.info(f"🔵 **CONTENT PLAYING** | Latency: {data_packet['latency_ms']}ms")
-            
-        # Draw the chart
-        chart_placeholder.line_chart(df2, x='time_only', y='latency_ms')
+             health_metric.success("Content Playing")
+
+        chart_placeholder.line_chart(st.session_state.df2, x='time_only', y='latency_ms')
         
-        # Alerts
-        buff_count = df2['ad_buffering'].sum()
-        lost_count = df2['lost_packet'].sum()
-        sig_fail_count = df2['signal_failure'].sum()
-
-        if buff_count > 0:
-            alert_placeholder.error(f"🔥 CRITICAL: {buff_count} Ad Buffering Events detected!")
-        elif lost_count > 0:
-            alert_placeholder.warning(f"⚠️ DATA LOSS: {lost_count} Packet Gaps detected.")
-        elif sig_fail_count > 0:
-            alert_placeholder.error(f"🚫 SIGNAL FAILURE: {sig_fail_count} SCTE-35 Triggers failed.")
+        # Business Alerts
+        if is_buffering.any():
+            alert_placeholder.error(f"CHURN RISK: Ad Buffering. {drop_off} viewers exited.")
+        elif st.session_state.viewers < 9000:
+             alert_placeholder.warning("Viewer count dropped due to poor ad experience.")
         else:
-            alert_placeholder.success("✅ System Healthy: No Critical Errors")
+            alert_placeholder.success("Ad Experience: Optimal")
 
-        # Increment and Sleep
         sequence_number += 1
         time.sleep(SEGMENT_DURATION)
 

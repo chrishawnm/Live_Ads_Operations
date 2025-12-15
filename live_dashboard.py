@@ -11,25 +11,32 @@ AD_BREAK_DURATION = 30.0
 CHAOS_MODE = True 
 
 # Setup the Streamlit Page
+st.set_page_config(page_title="Netflix Ads Watchdog", layout="wide") # Optional: Makes it look wider/pro
 st.title("Netflix Ads Live Monitor Simulation")
-st.write("Monitoring Stream: " + STREAM_ID)
 
-# --- 1. SETUP CHART (OUTSIDE THE LOOP) ---
-# We create the placeholder ONCE so we can reuse it
+# --- 1. SETUP UI ELEMENTS (OUTSIDE THE LOOP) ---
+# Top Status Bar (New!)
+col1, col2 = st.columns([1, 3])
+with col1:
+    st.write("Stream Source:")
+    st.code(STREAM_ID)
+with col2:
+    # This is where we will show "Content" vs "Ad"
+    status_indicator = st.empty()
+
+st.divider()
+
+# Chart & Alerts
 chart_placeholder = st.empty()
-# We also create a separate placeholder for text alerts below the chart
 alert_placeholder = st.empty()
 
-
-# --- SIDEBAR: PROJECT CONTEXT & EXPLANATIONS ---
+# --- SIDEBAR: PROJECT CONTEXT ---
 with st.sidebar:
     st.header("Project Context: Netflix Ads Engineer")
     st.markdown("""
     **Goal:** Simulate the "Health of Ad Operations" monitoring pipeline.
     
     **Technical Foundation:** Based on Netflix Patent *12262081 (Targeted Live Stream Ads)*. This dashboard monitors the raw telemetry from a live HLS stream to ensure **SCTE-35** ad markers are successfully splicing ads into content.
-
-    The app will start on its own to **STOP** press the **STOP** button in the top right corner. To **START**, refresh the page.
     """)
     
     st.divider()
@@ -37,37 +44,32 @@ with st.sidebar:
     st.subheader("1. Ad-Buffering (QoE)")
     st.info("""
     **Logic:** `latency > 1000ms` AND `event == 'ad_playing'`
-    
-    **The Story:** High latency during content is annoying, but during an **Ad**, it costs money. Advertisers demand refunds for buffering ads. This metric protects revenue by flagging "wasted impressions."
+    **The Story:** High latency during content is annoying, but during an **Ad**, it costs money. This flags "wasted impressions."
     """)
 
     st.subheader("2. Lost Packets (Billing)")
     st.warning("""
     **Logic:** Gap in `seq_id` (e.g., 50 -> 52)
-    
-    **The Story:** Ads are billed on "proof of play." If telemetry logs are dropped, we cannot prove the ad was delivered. This check ensures **Revenue Assurance** and data integrity.
+    **The Story:** Ads are billed on "proof of play." If telemetry logs are dropped, we cannot prove the ad was delivered.
     """)
 
     st.subheader("3. Signal Failure (Eng Health)")
     st.error("""
     **Logic:** `scte35_trigger` fired but `payload` is NULL.
-    
-    **The Story:** The encoder attempted to signal an ad break but failed to generate the Hex payload. This results in "Dead Air" (Black Screen) because the downstream server doesn't know which ad to insert.
+    **The Story:** Encoder failed to generate the Hex payload. Result: "Dead Air" (Black Screen).
     """)
     
     st.caption("Auto-refreshing every 2 seconds...")
 
 # Initialize History Buffer
 df2 = pd.DataFrame()
-prev_seq_id = None # Fix: Initialize this variable
+prev_seq_id = None 
 
-# SCTE-35 Mocking (Simplified for single-file demo)
+# SCTE-35 Mocking
 def generate_scte35_payload_mock():
-    # Returning a fake hex string for visual simplicity in the demo
     return "0xFC30" + "".join([random.choice("0123456789ABCDEF") for _ in range(8)])
 
 def generate_stream_data():
-    # Use global variables to update the history buffer
     global df2, prev_seq_id
     
     sequence_number = 0
@@ -111,20 +113,15 @@ def generate_stream_data():
             "latency_ms": round(latency_ms, 2)
         }
 
-        # --- 2. PROCESS DATA (Watchdog Logic) ---
-        
-        # FIFO Logic: Keep buffer at 50 rows
+        # --- 2. PROCESS DATA ---
         if len(df2) >= 50:
             df2 = df2.iloc[1:]
             
-        # Create new single-row DataFrame
         df = pd.DataFrame([data_packet])
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         
-        # Calculate Metrics
         df['ad_buffering'] = (df['latency_ms'] >= 1000) & (df['event'] == 'ad_playing')
         
-        # Check for lost packets (if we have a previous ID to compare to)
         if prev_seq_id is not None:
             df['lost_packet'] = df['seq_id'] != (prev_seq_id + 1)
         else:
@@ -133,34 +130,33 @@ def generate_stream_data():
         df['signal_failure'] = (df['scte35_payload'] == 'null') & (df['event'] == 'scte35_trigger')
         df['time_only'] = df['timestamp'].dt.strftime('%H:%M:%S')
         
-        # Update History
         df2 = pd.concat([df2, df], ignore_index=True)
-        
-        # Update Previous Sequence for next loop
         prev_seq_id = data_packet['seq_id']
 
         # --- 3. UPDATE UI ---
+        
+        # >>> NEW STATUS INDICATOR LOGIC <<<
+        if "ad" in event_type or event_type == "scte35_trigger":
+            status_indicator.warning(f"🟡 **AD BREAK IN PROGRESS** | Remaining: {ad_break_remaining}s")
+        else:
+            status_indicator.info(f"🔵 **CONTENT PLAYING** | Latency: {data_packet['latency_ms']}ms")
+            
         # Draw the chart
         chart_placeholder.line_chart(df2, x='time_only', y='latency_ms')
         
-        # --- ALERT LOGIC ---
-        # 1. Ad Buffering Check
+        # Alerts
         buff_count = df2['ad_buffering'].sum()
+        lost_count = df2['lost_packet'].sum()
+        sig_fail_count = df2['signal_failure'].sum()
+
         if buff_count > 0:
             alert_placeholder.error(f"🔥 CRITICAL: {buff_count} Ad Buffering Events detected!")
+        elif lost_count > 0:
+            alert_placeholder.warning(f"⚠️ DATA LOSS: {lost_count} Packet Gaps detected.")
+        elif sig_fail_count > 0:
+            alert_placeholder.error(f"🚫 SIGNAL FAILURE: {sig_fail_count} SCTE-35 Triggers failed.")
         else:
-            alert_placeholder.success("✅ Latency Status: Healthy")
-
-        # 2. Lost Packet Check
-        lost_count = df2['lost_packet'].sum()
-        if lost_count > 0:
-            # Create a new placeholder for this specific error so they stack nicely
-            st.warning(f"⚠️ DATA LOSS: {lost_count} Packet Gaps detected in sequence.")
-        
-        # 3. Signal Failure Check
-        sig_fail_count = df2['signal_failure'].sum()
-        if sig_fail_count > 0:
-            st.error(f"🚫 SIGNAL FAILURE: {sig_fail_count} SCTE-35 Triggers failed (Empty Payload).")
+            alert_placeholder.success("✅ System Healthy: No Critical Errors")
 
         # Increment and Sleep
         sequence_number += 1
